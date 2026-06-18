@@ -32,12 +32,16 @@ const pool = mysql.createPool({
 });
 
 // ===== HELPER FUNCTIONS =====
-function isChief(user) {
-    return user && (user.role === 'admin' || user.is_master_admin === 1 || user.id === 1);
+function isChiefAdmin(user) {
+    return user && user.id === 1;
 }
 
-function isAssistant(user) {
-    return user && user.role === 'assistant';
+function isAssistantChief(user) {
+    return user && user.role === 'assistant_chief';
+}
+
+function isAdmin(user) {
+    return user && user.role === 'admin';
 }
 
 function isElder(user) {
@@ -45,23 +49,27 @@ function isElder(user) {
 }
 
 function canManageUsers(user) {
-    return isChief(user);
+    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
 }
 
 function canManageElders(user) {
-    return isChief(user);
+    return isChiefAdmin(user) || isAssistantChief(user);
 }
 
-function canAddFamilies(user) {
-    return isChief(user) || isAssistant(user);
+function canCreateVillages(user) {
+    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
 }
 
-function canDeleteFamilies(user) {
-    return isChief(user);
+function canApproveVillages(user) {
+    return isChiefAdmin(user) || isAssistantChief(user);
+}
+
+function canAssignElders(user) {
+    return isChiefAdmin(user) || isAssistantChief(user);
 }
 
 function canAddResidentsDirect(user) {
-    return isChief(user) || isAssistant(user);
+    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
 }
 
 function canAddResidentsPending(user) {
@@ -69,23 +77,39 @@ function canAddResidentsPending(user) {
 }
 
 function canApproveResidents(user) {
-    return isChief(user);
+    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
 }
 
 function canDeleteResidents(user) {
-    return isChief(user);
+    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
+}
+
+function canApproveDeletions(user) {
+    return isChiefAdmin(user) || isAssistantChief(user);
+}
+
+function canAddFamilies(user) {
+    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
+}
+
+function canDeleteFamilies(user) {
+    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
+}
+
+function canApproveFamilyDeletion(user) {
+    return isChiefAdmin(user) || isAssistantChief(user);
 }
 
 function canViewAllResidents(user) {
-    return isChief(user) || isAssistant(user);
+    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
 }
 
-function canViewOwnVillageResidents(user) {
+function canViewOwnVillage(user) {
     return isElder(user);
 }
 
 function canViewAllReports(user) {
-    return isChief(user) || isAssistant(user);
+    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
 }
 
 function canViewOwnVillageReports(user) {
@@ -125,7 +149,7 @@ app.post('/api/login', (req, res) => {
     });
 });
 
-// ===== USERS MANAGEMENT (Chief Only) =====
+// ===== USERS MANAGEMENT =====
 app.get('/api/admin-users', (req, res) => {
     pool.query('SELECT id, username, full_name, role, is_enabled, is_master_admin, village_id, last_login, created_at FROM admin_users ORDER BY id', (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -206,23 +230,35 @@ app.get('/api/villages', (req, res) => {
 
 app.post('/api/villages', (req, res) => {
     const { name, location, elder_id } = req.body;
-    pool.query('INSERT INTO villages (name, location, elder_id) VALUES (?, ?, ?)',
+    pool.query('INSERT INTO villages (name, location, elder_id, status) VALUES (?, ?, ?, "pending")',
         [name, location, elder_id],
         (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
-            res.json({ success: true, id: result.insertId });
+            res.json({ success: true, id: result.insertId, status: 'pending' });
         }
     );
 });
 
-// ===== RESIDENTS =====
+app.put('/api/villages/:id/approve', (req, res) => {
+    const villageId = req.params.id;
+    pool.query('UPDATE villages SET status = "approved" WHERE id = ?', [villageId], (err) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ success: true });
+    });
+});
 
-// GET residents - based on user role
+app.put('/api/villages/:id/assign-elder', (req, res) => {
+    const { elder_id } = req.body;
+    const villageId = req.params.id;
+    pool.query('UPDATE villages SET elder_id = ? WHERE id = ?', [elder_id, villageId], (err) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ success: true });
+    });
+});
+
+// ===== RESIDENTS =====
 app.get('/api/residents', (req, res) => {
-    // For elders, only show their village residents
-    // For chief/assistant, show all
-    let query = 'SELECT * FROM residents ORDER BY full_name';
-    pool.query(query, (err, results) => {
+    pool.query('SELECT * FROM residents ORDER BY full_name', (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(results);
     });
@@ -236,7 +272,6 @@ app.get('/api/residents/:id', (req, res) => {
     });
 });
 
-// POST resident - Chief/Assistant direct, Elder goes to pending
 app.post('/api/residents', (req, res) => {
     const { full_name, national_id, unique_village_id, dob, gender, phone, village_id } = req.body;
     pool.query(
@@ -244,12 +279,12 @@ app.post('/api/residents', (req, res) => {
         [full_name, national_id, unique_village_id, dob, gender, phone, village_id || null],
         (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
-            res.json({ success: true, id: result.insertId, direct: true });
+            res.json({ success: true, id: result.insertId });
         }
     );
 });
 
-// PENDING RESIDENTS (Elders submit here)
+// PENDING RESIDENTS
 app.post('/api/pending-residents', (req, res) => {
     const { full_name, national_id, unique_village_id, dob, gender, phone, submitted_by, village_id } = req.body;
     pool.query(
@@ -262,7 +297,6 @@ app.post('/api/pending-residents', (req, res) => {
     );
 });
 
-// GET pending residents (Chief only)
 app.get('/api/pending-residents', (req, res) => {
     pool.query(
         `SELECT pr.*, u.full_name as submitter_name 
@@ -277,7 +311,6 @@ app.get('/api/pending-residents', (req, res) => {
     );
 });
 
-// Approve/Reject pending resident (Chief only)
 app.put('/api/pending-residents/:id', (req, res) => {
     const { status, reviewed_by, notes } = req.body;
     const pendingId = req.params.id;
@@ -291,20 +324,15 @@ app.put('/api/pending-residents/:id', (req, res) => {
                 return res.status(500).json({ error: err.message });
             }
             
-            // Get pending resident data
             connection.query('SELECT * FROM pending_residents WHERE id = ?', [pendingId], (err, pendingResults) => {
                 if (err || pendingResults.length === 0) {
-                    connection.rollback(() => {
-                        connection.release();
-                        return res.status(404).json({ error: 'Pending resident not found' });
-                    });
-                    return;
+                    connection.rollback(() => { connection.release(); });
+                    return res.status(404).json({ error: 'Pending resident not found' });
                 }
                 
                 const pending = pendingResults[0];
                 
                 if (status === 'approved') {
-                    // Move to residents table
                     connection.query(
                         'INSERT INTO residents (full_name, national_id, unique_village_id, dob, gender, phone, village_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
                         [pending.full_name, pending.national_id, pending.unique_village_id, pending.dob, pending.gender, pending.phone, pending.village_id],
@@ -313,8 +341,6 @@ app.put('/api/pending-residents/:id', (req, res) => {
                                 connection.rollback(() => { connection.release(); });
                                 return res.status(500).json({ error: err.message });
                             }
-                            
-                            // Update pending status
                             connection.query(
                                 'UPDATE pending_residents SET status = ?, reviewed_at = NOW(), reviewed_by = ?, notes = ? WHERE id = ?',
                                 [status, reviewed_by, notes || null, pendingId],
@@ -336,7 +362,6 @@ app.put('/api/pending-residents/:id', (req, res) => {
                         }
                     );
                 } else {
-                    // Just update status
                     connection.query(
                         'UPDATE pending_residents SET status = ?, reviewed_at = NOW(), reviewed_by = ?, notes = ? WHERE id = ?',
                         [status, reviewed_by, notes || null, pendingId],
@@ -361,8 +386,17 @@ app.put('/api/pending-residents/:id', (req, res) => {
     });
 });
 
-// DELETE resident (Chief only)
+// DELETE resident (pending approval)
 app.delete('/api/residents/:id', (req, res) => {
+    const residentId = req.params.id;
+    pool.query('UPDATE residents SET deletion_pending = 1, deletion_requested_at = NOW() WHERE id = ?', [residentId], (err) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ success: true, pending: true });
+    });
+});
+
+// Approve resident deletion
+app.delete('/api/residents/:id/approve', (req, res) => {
     pool.query('DELETE FROM residents WHERE id = ?', [req.params.id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ error: 'Resident not found' });
@@ -371,8 +405,6 @@ app.delete('/api/residents/:id', (req, res) => {
 });
 
 // ===== FAMILIES =====
-
-// GET families - all roles can view
 app.get('/api/families', (req, res) => {
     pool.query('SELECT * FROM families ORDER BY family_name', (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -403,7 +435,6 @@ app.get('/api/families/:id/members', (req, res) => {
     );
 });
 
-// POST family - Chief and Assistant can add
 app.post('/api/families', (req, res) => {
     const { family_head_id, family_name } = req.body;
     pool.query(
@@ -416,8 +447,15 @@ app.post('/api/families', (req, res) => {
     );
 });
 
-// DELETE family - Chief only
 app.delete('/api/families/:id', (req, res) => {
+    const familyId = req.params.id;
+    pool.query('UPDATE families SET deletion_pending = 1, deletion_requested_at = NOW() WHERE id = ?', [familyId], (err) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ success: true, pending: true });
+    });
+});
+
+app.delete('/api/families/:id/approve', (req, res) => {
     pool.query('DELETE FROM families WHERE id = ?', [req.params.id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ error: 'Family not found' });
@@ -496,21 +534,14 @@ app.get('/api/reports/families', (req, res) => {
     );
 });
 
-// Village-specific reports for elders
 app.get('/api/reports/village/:villageId', (req, res) => {
     const villageId = req.params.villageId;
     Promise.all([
-        new Promise((resolve, reject) => 
-            pool.query('SELECT COUNT(*) as count FROM residents WHERE village_id = ?', [villageId], (err, r) => err ? reject(err) : resolve(r[0].count))
-        ),
-        new Promise((resolve, reject) => 
-            pool.query('SELECT COUNT(*) as count FROM residents WHERE village_id = ? AND gender = "M"', [villageId], (err, r) => err ? reject(err) : resolve(r[0].count))
-        ),
-        new Promise((resolve, reject) => 
-            pool.query('SELECT COUNT(*) as count FROM residents WHERE village_id = ? AND gender = "F"', [villageId], (err, r) => err ? reject(err) : resolve(r[0].count))
-        )
+        new Promise((resolve, reject) => pool.query('SELECT COUNT(*) as count FROM residents WHERE village_id = ?', [villageId], (err, r) => err ? reject(err) : resolve(r[0].count))),
+        new Promise((resolve, reject) => pool.query('SELECT COUNT(*) as count FROM residents WHERE village_id = ? AND gender = "M"', [villageId], (err, r) => err ? reject(err) : resolve(r[0].count))),
+        new Promise((resolve, reject) => pool.query('SELECT COUNT(*) as count FROM residents WHERE village_id = ? AND gender = "F"', [villageId], (err, r) => err ? reject(err) : resolve(r[0].count)))
     ]).then(([total, male, female]) => {
-        res.json({ total, male, female, village_id: villageId });
+        res.json({ total: total.count, male: male.count, female: female.count, village_id: villageId });
     }).catch(err => res.status(500).json({ error: err.message }));
 });
 
