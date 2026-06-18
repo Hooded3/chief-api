@@ -55,7 +55,8 @@ app.post('/api/login', (req, res) => {
                         username: user.username,
                         role: user.role || 'user',
                         full_name: user.full_name,
-                        is_master_admin: user.is_master_admin || 0
+                        is_master_admin: user.is_master_admin || 0,
+                        is_chief_admin: user.id === 1 ? 1 : 0  // User ID 1 is the Chief Admin
                     }
                 });
             } else {
@@ -65,7 +66,7 @@ app.post('/api/login', (req, res) => {
     });
 });
 
-// Get all admin users (only for master admin)
+// Get all admin users
 app.get('/api/admin-users', (req, res) => {
     pool.query('SELECT id, username, full_name, role, is_enabled, is_master_admin, last_login, created_at FROM admin_users ORDER BY id', (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -103,12 +104,19 @@ app.post('/api/admin-users', (req, res) => {
     });
 });
 
-// Update admin user
+// Update admin user - with Chief Admin protection
 app.put('/api/admin-users/:id', (req, res) => {
     const { username, full_name, role, is_enabled, is_master_admin } = req.body;
+    const userId = parseInt(req.params.id);
+    
+    // Protect Chief Admin (ID = 1) - cannot be modified
+    if (userId === 1) {
+        return res.status(403).json({ error: 'Chief Admin cannot be modified' });
+    }
+    
     pool.query(
         'UPDATE admin_users SET username = ?, full_name = ?, role = ?, is_enabled = ?, is_master_admin = ? WHERE id = ?',
-        [username, full_name, role, is_enabled, is_master_admin, req.params.id],
+        [username, full_name, role, is_enabled, is_master_admin, userId],
         (err) => {
             if (err) return res.status(500).json({ error: err.message });
             res.json({ success: true });
@@ -116,26 +124,40 @@ app.put('/api/admin-users/:id', (req, res) => {
     );
 });
 
-// Delete admin user
-app.delete('/api/admin-users/:id', (req, res) => {
-    pool.query('DELETE FROM admin_users WHERE id = ? AND is_master_admin = 0', [req.params.id], (err, result) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (result.affectedRows === 0) {
-            return res.status(400).json({ error: 'Cannot delete master admin or user not found' });
-        }
-        res.json({ success: true });
-    });
-});
-
-// Reset password
+// Reset password - with Chief Admin protection
 app.put('/api/admin-users/:id/reset-password', (req, res) => {
     const { password } = req.body;
+    const userId = parseInt(req.params.id);
+    
+    // Protect Chief Admin (ID = 1) - cannot reset password
+    if (userId === 1) {
+        return res.status(403).json({ error: 'Chief Admin password cannot be reset' });
+    }
+    
     bcrypt.hash(password, 10, (err, hash) => {
         if (err) return res.status(500).json({ error: 'Password hashing error' });
-        pool.query('UPDATE admin_users SET password = ? WHERE id = ?', [hash, req.params.id], (err) => {
+        pool.query('UPDATE admin_users SET password = ? WHERE id = ?', [hash, userId], (err) => {
             if (err) return res.status(500).json({ error: err.message });
             res.json({ success: true });
         });
+    });
+});
+
+// Delete admin user - with Chief Admin protection
+app.delete('/api/admin-users/:id', (req, res) => {
+    const userId = parseInt(req.params.id);
+    
+    // Protect Chief Admin (ID = 1) - cannot be deleted
+    if (userId === 1) {
+        return res.status(403).json({ error: 'Chief Admin cannot be deleted' });
+    }
+    
+    pool.query('DELETE FROM admin_users WHERE id = ?', [userId], (err, result) => {
+        if (err) return res.status(500).json({ error: err.message });
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        res.json({ success: true });
     });
 });
 
