@@ -3,6 +3,7 @@ const express = require('express');
 const mysql = require('mysql2');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -10,7 +11,7 @@ const port = process.env.PORT || 4000;
 // CORS middleware
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Session-ID, X-Device-ID');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Credentials', 'true');
     if (req.method === 'OPTIONS') return res.sendStatus(200);
@@ -32,120 +33,240 @@ const pool = mysql.createPool({
 });
 
 // ===== HELPER FUNCTIONS =====
-function isChiefAdmin(user) {
-    return user && user.id === 1;
+
+function getClientInfo(req) {
+    return {
+        ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown',
+        userAgent: req.headers['user-agent'] || 'unknown',
+        sessionId: req.headers['x-session-id'] || crypto.randomBytes(16).toString('hex'),
+        deviceId: req.headers['x-device-id'] || 'unknown'
+    };
 }
 
-function isAssistantChief(user) {
-    return user && user.role === 'assistant_chief';
+function logActivity(userId, username, action, details, req) {
+    const clientInfo = getClientInfo(req);
+    pool.query(
+        'INSERT INTO activity_log (user_id, username, action, details, ip_address, user_agent) VALUES (?, ?, ?, ?, ?, ?)',
+        [userId, username, action, details, clientInfo.ip, clientInfo.userAgent],
+        (err) => { if (err) console.error('Activity log error:', err); }
+    );
 }
 
-function isAdmin(user) {
-    return user && user.role === 'admin';
+function logLoginHistory(userId, username, success, req, logoutTime = null) {
+    const clientInfo = getClientInfo(req);
+    pool.query(
+        'INSERT INTO login_history (user_id, username, login_time, ip_address, user_agent, success, logout_time, session_id) VALUES (?, ?, NOW(), ?, ?, ?, ?, ?)',
+        [userId, username, clientInfo.ip, clientInfo.userAgent, success, logoutTime, clientInfo.sessionId],
+        (err) => { if (err) console.error('Login history error:', err); }
+    );
 }
 
-function isElder(user) {
-    return user && user.role === 'elder';
+function logSuspiciousActivity(userId, username, activityType, details, severity, req) {
+    const clientInfo = getClientInfo(req);
+    pool.query(
+        'INSERT INTO suspicious_activities (user_id, username, ip_address, activity_type, details, severity) VALUES (?, ?, ?, ?, ?, ?)',
+        [userId, username, clientInfo.ip, activityType, details, severity],
+        (err) => { if (err) console.error('Suspicious activity error:', err); }
+    );
 }
 
-function canManageUsers(user) {
-    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
-}
+function isChiefAdmin(user) { return user && user.id === 1; }
+function isAssistantChief(user) { return user && user.role === 'assistant_chief'; }
+function isAdmin(user) { return user && user.role === 'admin'; }
+function isElder(user) { return user && user.role === 'elder'; }
 
-function canManageElders(user) {
-    return isChiefAdmin(user) || isAssistantChief(user);
-}
-
-function canCreateVillages(user) {
-    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
-}
-
-function canApproveVillages(user) {
-    return isChiefAdmin(user) || isAssistantChief(user);
-}
-
-function canAssignElders(user) {
-    return isChiefAdmin(user) || isAssistantChief(user);
-}
-
-function canAddResidentsDirect(user) {
-    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
-}
-
-function canAddResidentsPending(user) {
-    return isElder(user);
-}
-
-function canApproveResidents(user) {
-    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
-}
-
-function canDeleteResidents(user) {
-    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
-}
-
-function canApproveDeletions(user) {
-    return isChiefAdmin(user) || isAssistantChief(user);
-}
-
-function canAddFamilies(user) {
-    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
-}
-
-function canDeleteFamilies(user) {
-    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
-}
-
-function canApproveFamilyDeletion(user) {
-    return isChiefAdmin(user) || isAssistantChief(user);
-}
-
-function canViewAllResidents(user) {
-    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
-}
-
-function canViewOwnVillage(user) {
-    return isElder(user);
-}
-
-function canViewAllReports(user) {
-    return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user);
-}
-
-function canViewOwnVillageReports(user) {
-    return isElder(user);
-}
+function canManageUsers(user) { return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user); }
+function canViewSecurity(user) { return isChiefAdmin(user) || isAssistantChief(user) || isAdmin(user); }
 
 // ===== AUTH =====
 app.post('/api/login', (req, res) => {
     const { username, password, userType } = req.body;
-    let query = userType === 'staff' 
-        ? 'SELECT * FROM admin_users WHERE username = ?' 
-        : 'SELECT * FROM resident_portal_access WHERE username = ?';
+    const clientInfo = getClientInfo(req);
     
-    pool.query(query, [username], (err, results) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (results.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
-        const user = results[0];
-        bcrypt.compare(password, user.password, (err, result) => {
-            if (err) return res.status(500).json({ error: 'Login error' });
-            if (result) {
-                res.json({
-                    success: true,
-                    user: {
-                        id: user.id,
-                        username: user.username,
-                        role: user.role || 'user',
-                        full_name: user.full_name,
-                        is_master_admin: user.is_master_admin || 0,
-                        is_chief_admin: user.id === 1 ? 1 : 0,
-                        village_id: user.village_id || null
+    // Check for brute force - count failed attempts in last 15 minutes
+    pool.query(
+        'SELECT COUNT(*) as attempts FROM failed_logins WHERE username = ? AND attempt_time > DATE_SUB(NOW(), INTERVAL 15 MINUTE)',
+        [username],
+        (err, results) => {
+            if (err) return res.status(500).json({ error: err.message });
+            if (results[0].attempts >= 5) {
+                logSuspiciousActivity(null, username, 'brute_force', `Multiple failed login attempts (${results[0].attempts})`, 'high', req);
+                return res.status(429).json({ error: 'Too many failed attempts. Please try again later.' });
+            }
+            
+            let query = userType === 'staff' 
+                ? 'SELECT * FROM admin_users WHERE username = ?' 
+                : 'SELECT * FROM resident_portal_access WHERE username = ?';
+            
+            pool.query(query, [username], (err, results) => {
+                if (err) return res.status(500).json({ error: err.message });
+                
+                if (results.length === 0) {
+                    // Log failed attempt
+                    pool.query('INSERT INTO failed_logins (username, ip_address, user_agent) VALUES (?, ?, ?)',
+                        [username, clientInfo.ip, clientInfo.userAgent]);
+                    logSuspiciousActivity(null, username, 'failed_login', 'Invalid username attempt', 'low', req);
+                    return res.status(401).json({ error: 'Invalid credentials' });
+                }
+                
+                const user = results[0];
+                bcrypt.compare(password, user.password, (err, result) => {
+                    if (err) return res.status(500).json({ error: 'Login error' });
+                    
+                    if (result) {
+                        // Clear failed attempts
+                        pool.query('DELETE FROM failed_logins WHERE username = ?', [username]);
+                        
+                        // Update last login
+                        pool.query('UPDATE admin_users SET last_login = NOW() WHERE id = ?', [user.id]);
+                        
+                        // Log login history
+                        logLoginHistory(user.id, username, true, req);
+                        
+                        // Track device
+                        pool.query(
+                            'INSERT INTO user_devices (user_id, device_id, device_name, ip_address, last_used) VALUES (?, ?, ?, ?, NOW()) ON DUPLICATE KEY UPDATE last_used = NOW(), ip_address = ?',
+                            [user.id, clientInfo.deviceId, clientInfo.userAgent.substring(0, 50), clientInfo.ip, clientInfo.ip]
+                        );
+                        
+                        // Update session
+                        pool.query(
+                            'INSERT INTO user_sessions (user_id, session_id, ip_address, user_agent) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE last_activity = NOW(), ip_address = ?',
+                            [user.id, clientInfo.sessionId, clientInfo.ip, clientInfo.userAgent, clientInfo.ip]
+                        );
+                        
+                        logActivity(user.id, username, 'Login', 'User logged in successfully', req);
+                        
+                        res.json({
+                            success: true,
+                            user: {
+                                id: user.id,
+                                username: user.username,
+                                role: user.role || 'user',
+                                full_name: user.full_name,
+                                is_master_admin: user.is_master_admin || 0,
+                                is_chief_admin: user.id === 1 ? 1 : 0,
+                                village_id: user.village_id || null
+                            },
+                            sessionId: clientInfo.sessionId
+                        });
+                    } else {
+                        // Log failed attempt
+                        pool.query('INSERT INTO failed_logins (username, ip_address, user_agent) VALUES (?, ?, ?)',
+                            [username, clientInfo.ip, clientInfo.userAgent]);
+                        logSuspiciousActivity(null, username, 'failed_login', 'Invalid password attempt', 'low', req);
+                        res.status(401).json({ error: 'Invalid credentials' });
                     }
                 });
-            } else {
-                res.status(401).json({ error: 'Invalid credentials' });
+            });
+        }
+    );
+});
+
+// ===== LOGOUT =====
+app.post('/api/logout', (req, res) => {
+    const { user_id, session_id } = req.body;
+    if (user_id) {
+        pool.query('UPDATE user_sessions SET is_active = 0 WHERE user_id = ? AND session_id = ?',
+            [user_id, session_id],
+            (err) => {
+                if (err) console.error('Logout error:', err);
             }
-        });
+        );
+        pool.query('UPDATE login_history SET logout_time = NOW() WHERE user_id = ? AND session_id = ? ORDER BY id DESC LIMIT 1',
+            [user_id, session_id],
+            (err) => {
+                if (err) console.error('Logout history error:', err);
+            }
+        );
+    }
+    res.json({ success: true });
+});
+
+// ===== SECURITY FEATURES =====
+
+// Get login history
+app.get('/api/security/login-history', (req, res) => {
+    pool.query(
+        'SELECT lh.*, u.full_name FROM login_history lh LEFT JOIN admin_users u ON lh.user_id = u.id ORDER BY lh.login_time DESC LIMIT 100',
+        (err, results) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(results);
+        }
+    );
+});
+
+// Get activity log
+app.get('/api/security/activity-log', (req, res) => {
+    pool.query(
+        'SELECT al.*, u.full_name FROM activity_log al LEFT JOIN admin_users u ON al.user_id = u.id ORDER BY al.created_at DESC LIMIT 100',
+        (err, results) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(results);
+        }
+    );
+});
+
+// Get suspicious activities
+app.get('/api/security/suspicious', (req, res) => {
+    pool.query(
+        'SELECT sa.*, u.full_name FROM suspicious_activities sa LEFT JOIN admin_users u ON sa.user_id = u.id ORDER BY sa.created_at DESC',
+        (err, results) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(results);
+        }
+    );
+});
+
+// Update suspicious activity status
+app.put('/api/security/suspicious/:id', (req, res) => {
+    const { status, notes, resolved_by } = req.body;
+    pool.query(
+        'UPDATE suspicious_activities SET status = ?, notes = ?, resolved_at = NOW(), resolved_by = ? WHERE id = ?',
+        [status, notes, resolved_by, req.params.id],
+        (err) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ success: true });
+        }
+    );
+});
+
+// Get user sessions
+app.get('/api/security/sessions', (req, res) => {
+    pool.query(
+        'SELECT us.*, u.full_name FROM user_sessions us LEFT JOIN admin_users u ON us.user_id = u.id WHERE us.is_active = 1 ORDER BY us.last_activity DESC',
+        (err, results) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(results);
+        }
+    );
+});
+
+// Terminate session
+app.delete('/api/security/sessions/:id', (req, res) => {
+    pool.query('UPDATE user_sessions SET is_active = 0 WHERE id = ?', [req.params.id], (err) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ success: true });
+    });
+});
+
+// Get user devices
+app.get('/api/security/devices', (req, res) => {
+    pool.query(
+        'SELECT ud.*, u.full_name FROM user_devices ud LEFT JOIN admin_users u ON ud.user_id = u.id ORDER BY ud.last_used DESC',
+        (err, results) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(results);
+        }
+    );
+});
+
+// Trust/Untrust device
+app.put('/api/security/devices/:id', (req, res) => {
+    const { is_trusted } = req.body;
+    pool.query('UPDATE user_devices SET is_trusted = ? WHERE id = ?', [is_trusted, req.params.id], (err) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ success: true });
     });
 });
 
@@ -177,6 +298,8 @@ app.post('/api/admin-users', (req, res) => {
                     if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Username already exists' });
                     return res.status(500).json({ error: err.message });
                 }
+                // Create user settings
+                pool.query('INSERT INTO user_settings (user_id) VALUES (?)', [result.insertId]);
                 res.json({ success: true, id: result.insertId });
             }
         );
@@ -192,6 +315,7 @@ app.put('/api/admin-users/:id', (req, res) => {
         [username, full_name, role, is_enabled, is_master_admin, village_id, userId],
         (err) => {
             if (err) return res.status(500).json({ error: err.message });
+            logActivity(userId, username, 'User Updated', `User ${username} updated their profile`, req);
             res.json({ success: true });
         }
     );
@@ -205,6 +329,7 @@ app.put('/api/admin-users/:id/reset-password', (req, res) => {
         if (err) return res.status(500).json({ error: 'Password hashing error' });
         pool.query('UPDATE admin_users SET password = ? WHERE id = ?', [hash, userId], (err) => {
             if (err) return res.status(500).json({ error: err.message });
+            logActivity(userId, 'system', 'Password Reset', `Password reset for user ID ${userId}`, req);
             res.json({ success: true });
         });
     });
@@ -284,109 +409,18 @@ app.post('/api/residents', (req, res) => {
     );
 });
 
-// PENDING RESIDENTS
-app.post('/api/pending-residents', (req, res) => {
-    const { full_name, national_id, unique_village_id, dob, gender, phone, submitted_by, village_id } = req.body;
+app.put('/api/residents/:id', (req, res) => {
+    const { full_name, national_id, unique_village_id, dob, gender, phone, village_id } = req.body;
     pool.query(
-        'INSERT INTO pending_residents (full_name, national_id, unique_village_id, dob, gender, phone, submitted_by, village_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, "pending")',
-        [full_name, national_id, unique_village_id, dob, gender, phone, submitted_by, village_id || null],
-        (err, result) => {
+        'UPDATE residents SET full_name = ?, national_id = ?, unique_village_id = ?, dob = ?, gender = ?, phone = ?, village_id = ? WHERE id = ?',
+        [full_name, national_id, unique_village_id, dob, gender, phone, village_id, req.params.id],
+        (err) => {
             if (err) return res.status(500).json({ error: err.message });
-            res.json({ success: true, id: result.insertId });
+            res.json({ success: true });
         }
     );
 });
 
-app.get('/api/pending-residents', (req, res) => {
-    pool.query(
-        `SELECT pr.*, u.full_name as submitter_name 
-         FROM pending_residents pr
-         LEFT JOIN admin_users u ON pr.submitted_by = u.id
-         WHERE pr.status = 'pending'
-         ORDER BY pr.submitted_at DESC`,
-        (err, results) => {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json(results);
-        }
-    );
-});
-
-app.put('/api/pending-residents/:id', (req, res) => {
-    const { status, reviewed_by, notes } = req.body;
-    const pendingId = req.params.id;
-    
-    pool.getConnection((err, connection) => {
-        if (err) return res.status(500).json({ error: err.message });
-        
-        connection.beginTransaction((err) => {
-            if (err) {
-                connection.release();
-                return res.status(500).json({ error: err.message });
-            }
-            
-            connection.query('SELECT * FROM pending_residents WHERE id = ?', [pendingId], (err, pendingResults) => {
-                if (err || pendingResults.length === 0) {
-                    connection.rollback(() => { connection.release(); });
-                    return res.status(404).json({ error: 'Pending resident not found' });
-                }
-                
-                const pending = pendingResults[0];
-                
-                if (status === 'approved') {
-                    connection.query(
-                        'INSERT INTO residents (full_name, national_id, unique_village_id, dob, gender, phone, village_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                        [pending.full_name, pending.national_id, pending.unique_village_id, pending.dob, pending.gender, pending.phone, pending.village_id],
-                        (err) => {
-                            if (err) {
-                                connection.rollback(() => { connection.release(); });
-                                return res.status(500).json({ error: err.message });
-                            }
-                            connection.query(
-                                'UPDATE pending_residents SET status = ?, reviewed_at = NOW(), reviewed_by = ?, notes = ? WHERE id = ?',
-                                [status, reviewed_by, notes || null, pendingId],
-                                (err) => {
-                                    if (err) {
-                                        connection.rollback(() => { connection.release(); });
-                                        return res.status(500).json({ error: err.message });
-                                    }
-                                    connection.commit((err) => {
-                                        if (err) {
-                                            connection.rollback(() => { connection.release(); });
-                                            return res.status(500).json({ error: err.message });
-                                        }
-                                        connection.release();
-                                        res.json({ success: true, action: 'approved' });
-                                    });
-                                }
-                            );
-                        }
-                    );
-                } else {
-                    connection.query(
-                        'UPDATE pending_residents SET status = ?, reviewed_at = NOW(), reviewed_by = ?, notes = ? WHERE id = ?',
-                        [status, reviewed_by, notes || null, pendingId],
-                        (err) => {
-                            if (err) {
-                                connection.rollback(() => { connection.release(); });
-                                return res.status(500).json({ error: err.message });
-                            }
-                            connection.commit((err) => {
-                                if (err) {
-                                    connection.rollback(() => { connection.release(); });
-                                    return res.status(500).json({ error: err.message });
-                                }
-                                connection.release();
-                                res.json({ success: true, action: status });
-                            });
-                        }
-                    );
-                }
-            });
-        });
-    });
-});
-
-// DELETE resident (pending approval)
 app.delete('/api/residents/:id', (req, res) => {
     const residentId = req.params.id;
     pool.query('UPDATE residents SET deletion_pending = 1, deletion_requested_at = NOW() WHERE id = ?', [residentId], (err) => {
@@ -395,7 +429,6 @@ app.delete('/api/residents/:id', (req, res) => {
     });
 });
 
-// Approve resident deletion
 app.delete('/api/residents/:id/approve', (req, res) => {
     pool.query('DELETE FROM residents WHERE id = ?', [req.params.id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -543,6 +576,108 @@ app.get('/api/reports/village/:villageId', (req, res) => {
     ]).then(([total, male, female]) => {
         res.json({ total: total.count, male: male.count, female: female.count, village_id: villageId });
     }).catch(err => res.status(500).json({ error: err.message }));
+});
+
+// ===== PENDING RESIDENTS =====
+app.post('/api/pending-residents', (req, res) => {
+    const { full_name, national_id, unique_village_id, dob, gender, phone, submitted_by, village_id } = req.body;
+    pool.query(
+        'INSERT INTO pending_residents (full_name, national_id, unique_village_id, dob, gender, phone, submitted_by, village_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, "pending")',
+        [full_name, national_id, unique_village_id, dob, gender, phone, submitted_by, village_id || null],
+        (err, result) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ success: true, id: result.insertId });
+        }
+    );
+});
+
+app.get('/api/pending-residents', (req, res) => {
+    pool.query(
+        `SELECT pr.*, u.full_name as submitter_name 
+         FROM pending_residents pr
+         LEFT JOIN admin_users u ON pr.submitted_by = u.id
+         WHERE pr.status = 'pending'
+         ORDER BY pr.submitted_at DESC`,
+        (err, results) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(results);
+        }
+    );
+});
+
+app.put('/api/pending-residents/:id', (req, res) => {
+    const { status, reviewed_by, notes } = req.body;
+    const pendingId = req.params.id;
+    
+    pool.getConnection((err, connection) => {
+        if (err) return res.status(500).json({ error: err.message });
+        
+        connection.beginTransaction((err) => {
+            if (err) {
+                connection.release();
+                return res.status(500).json({ error: err.message });
+            }
+            
+            connection.query('SELECT * FROM pending_residents WHERE id = ?', [pendingId], (err, pendingResults) => {
+                if (err || pendingResults.length === 0) {
+                    connection.rollback(() => { connection.release(); });
+                    return res.status(404).json({ error: 'Pending resident not found' });
+                }
+                
+                const pending = pendingResults[0];
+                
+                if (status === 'approved') {
+                    connection.query(
+                        'INSERT INTO residents (full_name, national_id, unique_village_id, dob, gender, phone, village_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                        [pending.full_name, pending.national_id, pending.unique_village_id, pending.dob, pending.gender, pending.phone, pending.village_id],
+                        (err) => {
+                            if (err) {
+                                connection.rollback(() => { connection.release(); });
+                                return res.status(500).json({ error: err.message });
+                            }
+                            connection.query(
+                                'UPDATE pending_residents SET status = ?, reviewed_at = NOW(), reviewed_by = ?, notes = ? WHERE id = ?',
+                                [status, reviewed_by, notes || null, pendingId],
+                                (err) => {
+                                    if (err) {
+                                        connection.rollback(() => { connection.release(); });
+                                        return res.status(500).json({ error: err.message });
+                                    }
+                                    connection.commit((err) => {
+                                        if (err) {
+                                            connection.rollback(() => { connection.release(); });
+                                            return res.status(500).json({ error: err.message });
+                                        }
+                                        connection.release();
+                                        res.json({ success: true, action: 'approved' });
+                                    });
+                                }
+                            );
+                        }
+                    );
+                } else {
+                    connection.query(
+                        'UPDATE pending_residents SET status = ?, reviewed_at = NOW(), reviewed_by = ?, notes = ? WHERE id = ?',
+                        [status, reviewed_by, notes || null, pendingId],
+                        (err) => {
+                            if (err) {
+                                connection.rollback(() => { connection.release(); });
+                                return res.status(500).json({ error: err.message });
+                            }
+                            connection.commit((err) => {
+                                if (err) {
+                                    connection.rollback(() => { connection.release(); });
+                                    return res.status(500).json({ error: err.message });
+                                }
+                                connection.release();
+                                res.json({ success: true, action: status });
+                            });
+                        }
+                    );
+                }
+            });
+        });
+    });
 });
 
 app.listen(port, () => {
