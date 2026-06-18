@@ -683,3 +683,68 @@ app.put('/api/pending-residents/:id', (req, res) => {
 app.listen(port, () => {
     console.log(`Chief Records API running on port ${port}`);
 });
+
+// ===== SCHOOLS =====
+app.get('/api/schools', (req, res) => {
+    pool.query('SELECT * FROM schools ORDER BY name', (err, results) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(results);
+    });
+});
+
+app.post('/api/schools', (req, res) => {
+    const { name, location, type, contact_phone, contact_email } = req.body;
+    pool.query(
+        'INSERT INTO schools (name, location, type, contact_phone, contact_email) VALUES (?, ?, ?, ?, ?)',
+        [name, location, type, contact_phone, contact_email],
+        (err, result) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ success: true, id: result.insertId });
+        }
+    );
+});
+
+app.put('/api/schools/:id', (req, res) => {
+    const { name, location, type, contact_phone, contact_email } = req.body;
+    pool.query(
+        'UPDATE schools SET name = ?, location = ?, type = ?, contact_phone = ?, contact_email = ? WHERE id = ?',
+        [name, location, type, contact_phone, contact_email, req.params.id],
+        (err) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ success: true });
+        }
+    );
+});
+
+app.delete('/api/schools/:id', (req, res) => {
+    pool.query('DELETE FROM schools WHERE id = ?', [req.params.id], (err) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ success: true });
+    });
+});
+
+// Get residents by school
+app.get('/api/schools/:id/residents', (req, res) => {
+    const schoolId = req.params.id;
+    pool.query(
+        'SELECT r.* FROM residents r WHERE r.school_id = ? ORDER BY r.full_name',
+        [schoolId],
+        (err, results) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(results);
+        }
+    );
+});
+
+// Update resident school info
+app.put('/api/residents/:id/school', (req, res) => {
+    const { school_id, current_grade, school_status } = req.body;
+    pool.query(
+        'UPDATE residents SET school_id = ?, current_grade = ?, school_status = ? WHERE id = ?',
+        [school_id, current_grade, school_status, req.params.id],
+        (err) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ success: true });
+        }
+    );
+});
