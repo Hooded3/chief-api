@@ -32,9 +32,7 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
-// ===== AUTH & USERS =====
-
-// Login
+// ===== AUTH =====
 app.post('/api/login', (req, res) => {
     const { username, password, userType } = req.body;
     let query = userType === 'staff' 
@@ -56,7 +54,7 @@ app.post('/api/login', (req, res) => {
                         role: user.role || 'user',
                         full_name: user.full_name,
                         is_master_admin: user.is_master_admin || 0,
-                        is_chief_admin: user.id === 1 ? 1 : 0  // User ID 1 is the Chief Admin
+                        is_chief_admin: user.id === 1 ? 1 : 0
                     }
                 });
             } else {
@@ -66,7 +64,7 @@ app.post('/api/login', (req, res) => {
     });
 });
 
-// Get all admin users
+// ===== USERS MANAGEMENT (Admin Only) =====
 app.get('/api/admin-users', (req, res) => {
     pool.query('SELECT id, username, full_name, role, is_enabled, is_master_admin, last_login, created_at FROM admin_users ORDER BY id', (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -74,7 +72,6 @@ app.get('/api/admin-users', (req, res) => {
     });
 });
 
-// Get single admin user
 app.get('/api/admin-users/:id', (req, res) => {
     pool.query('SELECT id, username, full_name, role, is_enabled, is_master_admin, last_login, created_at FROM admin_users WHERE id = ?', [req.params.id], (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -83,7 +80,6 @@ app.get('/api/admin-users/:id', (req, res) => {
     });
 });
 
-// Create admin user (only master admin)
 app.post('/api/admin-users', (req, res) => {
     const { username, password, full_name, role, is_enabled, is_master_admin } = req.body;
     bcrypt.hash(password, 10, (err, hash) => {
@@ -104,16 +100,12 @@ app.post('/api/admin-users', (req, res) => {
     });
 });
 
-// Update admin user - with Chief Admin protection
 app.put('/api/admin-users/:id', (req, res) => {
     const { username, full_name, role, is_enabled, is_master_admin } = req.body;
     const userId = parseInt(req.params.id);
-    
-    // Protect Chief Admin (ID = 1) - cannot be modified
     if (userId === 1) {
         return res.status(403).json({ error: 'Chief Admin cannot be modified' });
     }
-    
     pool.query(
         'UPDATE admin_users SET username = ?, full_name = ?, role = ?, is_enabled = ?, is_master_admin = ? WHERE id = ?',
         [username, full_name, role, is_enabled, is_master_admin, userId],
@@ -124,16 +116,12 @@ app.put('/api/admin-users/:id', (req, res) => {
     );
 });
 
-// Reset password - with Chief Admin protection
 app.put('/api/admin-users/:id/reset-password', (req, res) => {
     const { password } = req.body;
     const userId = parseInt(req.params.id);
-    
-    // Protect Chief Admin (ID = 1) - cannot reset password
     if (userId === 1) {
         return res.status(403).json({ error: 'Chief Admin password cannot be reset' });
     }
-    
     bcrypt.hash(password, 10, (err, hash) => {
         if (err) return res.status(500).json({ error: 'Password hashing error' });
         pool.query('UPDATE admin_users SET password = ? WHERE id = ?', [hash, userId], (err) => {
@@ -143,15 +131,11 @@ app.put('/api/admin-users/:id/reset-password', (req, res) => {
     });
 });
 
-// Delete admin user - with Chief Admin protection
 app.delete('/api/admin-users/:id', (req, res) => {
     const userId = parseInt(req.params.id);
-    
-    // Protect Chief Admin (ID = 1) - cannot be deleted
     if (userId === 1) {
         return res.status(403).json({ error: 'Chief Admin cannot be deleted' });
     }
-    
     pool.query('DELETE FROM admin_users WHERE id = ?', [userId], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) {
@@ -162,6 +146,8 @@ app.delete('/api/admin-users/:id', (req, res) => {
 });
 
 // ===== RESIDENTS =====
+
+// GET /api/residents - All roles can view, but elders only view
 app.get('/api/residents', (req, res) => {
     pool.query('SELECT * FROM residents ORDER BY full_name', (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -177,6 +163,7 @@ app.get('/api/residents/:id', (req, res) => {
     });
 });
 
+// POST /api/residents - Only Admin, Assistant Chief, Master Admin
 app.post('/api/residents', (req, res) => {
     const { full_name, national_id, unique_village_id, dob, gender, phone } = req.body;
     pool.query(
@@ -189,6 +176,7 @@ app.post('/api/residents', (req, res) => {
     );
 });
 
+// PUT /api/residents/:id - Only Admin, Assistant Chief, Master Admin
 app.put('/api/residents/:id', (req, res) => {
     const { full_name, national_id, unique_village_id, dob, gender, phone } = req.body;
     pool.query(
@@ -201,6 +189,7 @@ app.put('/api/residents/:id', (req, res) => {
     );
 });
 
+// DELETE /api/residents/:id - Only Admin, Master Admin (not Assistant Chief or Elder)
 app.delete('/api/residents/:id', (req, res) => {
     pool.query('DELETE FROM residents WHERE id = ?', [req.params.id], (err) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -209,6 +198,8 @@ app.delete('/api/residents/:id', (req, res) => {
 });
 
 // ===== FAMILIES =====
+
+// GET /api/families - All roles can view
 app.get('/api/families', (req, res) => {
     pool.query('SELECT * FROM families ORDER BY family_name', (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -239,6 +230,7 @@ app.get('/api/families/:id/members', (req, res) => {
     );
 });
 
+// POST /api/families - Only Admin, Master Admin
 app.post('/api/families', (req, res) => {
     const { family_head_id, family_name } = req.body;
     pool.query(
@@ -251,6 +243,7 @@ app.post('/api/families', (req, res) => {
     );
 });
 
+// DELETE /api/families/:id - Only Admin, Master Admin
 app.delete('/api/families/:id', (req, res) => {
     pool.query('DELETE FROM families WHERE id = ?', [req.params.id], (err) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -302,6 +295,30 @@ app.get('/api/stats', (req, res) => {
     ]).then(([residents, families, heads, users]) => {
         res.json({ residents, families, family_heads: heads, users });
     }).catch(err => res.status(500).json({ error: err.message }));
+});
+
+// ===== REPORTS (Read-only for all staff) =====
+app.get('/api/reports/residents', (req, res) => {
+    pool.query('SELECT full_name, unique_village_id, gender, phone, is_family_head FROM residents ORDER BY full_name', (err, results) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(results);
+    });
+});
+
+app.get('/api/reports/families', (req, res) => {
+    pool.query(
+        `SELECT f.id, f.family_name, r.full_name as head_name, 
+                COUNT(fl.resident_id) as member_count
+         FROM families f
+         LEFT JOIN residents r ON f.family_head_id = r.id
+         LEFT JOIN family_links fl ON f.id = fl.family_id
+         GROUP BY f.id
+         ORDER BY f.family_name`,
+        (err, results) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(results);
+        }
+    );
 });
 
 app.listen(port, () => {
